@@ -120,6 +120,39 @@ def db_update_actor(db, id, col_name, value):
         print(f'Failed to update Actor {id} fields {col_name} {value}: {e}')
 
 
+def db_get_actors(db, order, page, size, filter):
+    # Turn comma-separated string for sorting the lst
+    # to an SQL statement
+
+    order = order.split(',')
+    order_sql = []
+    for s in order:
+        if '+' in s:
+            order_type = 'ASC'
+            order_keyword = s.replace('+', '')
+        else:
+            order_type = 'DESC'
+            order_keyword = s.replace('-', '')
+        order_sql.append(order_keyword + " " + order_type)
+
+    # +name,+id will now be name ASC, id ASC
+    order_sql = ','.join(order_sql)
+
+    starting_row = (int(page) - 1) * int(size)
+
+    try:
+        sql_search_cmd = f"""SELECT {filter} FROM ACTORS
+        ORDER BY {order_sql} LIMIT {starting_row}, {size}"""
+        print(sql_search_cmd)
+        cursor = db.cursor()
+        cursor.execute(sql_search_cmd)
+        result = cursor.fetchall()
+        cursor.close()
+        return result
+    except sqlite3.Error as e:
+        print(e)
+
+
 def get_actor_links(db, id):
     links = {}
     links['self'] = {"href": f"http://127.0.0.1:5000/actors/{id}"}
@@ -130,17 +163,22 @@ def get_actor_links(db, id):
     return links
 
 
-# ===== Connecting to the database =====
-try:
-    db = db_connect()
-    db_create_table(db)
-except:
-    print('Could not connect to database')
-    exit(0)
+def get_actors_list_links(db, order, page, size, filter):
+    links = {}
+    links['self'] = {
+        "href": f"http://127.0.0.1:5000/actors?order={order}&page={page}&size={size}&filter={filter}"}
+    if db_validate_actor_id(db, (int(page) + 1) * int(size)):
+        links['next'] = {
+            "href": f"http://127.0.0.1:5000/actors?order={order}&page={(int(page) + 1)}&size={size}&filter={filter}"}
+
+    if db_validate_actor_id(db, (int(page) - 1) * int(size)):
+        links['prev'] = {
+            "href": f"http://127.0.0.1:5000/actors?order={order}&page={(int(page) - 1)}&size={size}&filter={filter}"}
+
+    return links
+
 
 # ===== API Helpers =====
-
-
 def tvmaze_handle_actor_response(data):
     actor_data = data[0]['person']
     last_updated_date = datetime.now().strftime('%Y-%m-%d-%H:%M:%S')
@@ -199,12 +237,12 @@ def tvmaze_get_actor_info(actor_name):
 # ===== API HTTP Routes =====
 
 
-@api.route('/actors')
+@ api.route('/actors')
 class ActorsList(Resource):
-    @api.expect(actor_input_model, validate=True)
-    @api.response(201, 'Actor Added Succesfully')
-    @api.response(400, 'Invalid actor name')
-    @api.response(404, 'Actor could not be foundß')
+    @ api.expect(actor_input_model, validate=True)
+    @ api.response(201, 'Actor Added Succesfully')
+    @ api.response(400, 'Invalid actor name')
+    @ api.response(404, 'Actor could not be foundß')
     def post(self):
         '''Q1 - Add a new Actor'''
 
@@ -223,6 +261,26 @@ class ActorsList(Resource):
             'last-update': actor_info['last_updated_date'],
             '_links': get_actor_links(db, new_actor_id)
         }, 201
+
+    @api.param('size', 'Number of actors per page')
+    @api.param('order', 'CSV value to sort the list based on the given criteria')
+    @api.param('page', 'The starting page')
+    @api.param('filter', 'CSV value to specify what attributes to fetch')
+    def get(self):
+        '''Q5 - Retrieve the list of available actors'''
+        order = request.args.get('order', '+id')
+        page = request.args.get('page', 1)
+        size = request.args.get('size', 10)
+        filter = request.args.get('filter', 'id,name')
+
+        actors_list = db_get_actors(db, order, page, size, filter)
+
+        return {
+            'page': page,
+            'page-size': size,
+            'actors': actors_list,
+            '_links': get_actors_list_links(db, order, page, size, filter)
+        }
 
 
 @api.route('/actors/<int:id>')
@@ -300,8 +358,19 @@ class Actors(Resource):
         }
 
 
+# Connecting to the database
+try:
+    db = db_connect()
+    db_create_table(db)
+except:
+    print('Could not connect to database')
+    exit(0)
+
+
 if __name__ == '__main__':
+    # Run Flask API
     app.run(debug=True)
+
 
 # Close the connection
 db.close()
