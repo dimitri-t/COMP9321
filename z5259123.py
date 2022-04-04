@@ -1,11 +1,18 @@
 import re
+from this import d
 import requests
 import sqlite3
 from typing import List
 from flask import Flask, request
 from flask_restx import Resource, Api, fields
 from datetime import datetime
+import urllib.parse
 
+# ===== Constants ======
+DB_NAME = 'z5259123.sqlite'
+DB_TABLE_NAME = 'actors'
+
+# ===== Flask API Connection ======
 app = Flask(__name__)
 api = Api(app)
 
@@ -24,9 +31,13 @@ actor_model = api.model('Actor', {
 })
 
 
-# ===== SQLite functions =====
+# ===== SQLite db functions =====
 
-def create_table(db):
+def db_connect():
+    return sqlite3.connect(DB_NAME, check_same_thread=False)
+
+
+def db_create_table(db):
     create_table_sql_command = """CREATE TABLE IF NOT EXISTS actors(
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
@@ -46,11 +57,13 @@ def create_table(db):
         print(f'Failed to create table" {e}')
 
 
-def insert_actor(db, name, country, birthday, deathday, gender, shows, last_updated_date):
+def db_insert_actor(db, actor):
+    shows = ', '.join([str(show) for show in actor['shows']])
+
     insert_actor_command = f"""INSERT INTO actors
         (name, country, birthday, deathday, gender, shows, last_updated_date)
-        values ('{name}', '{country}', '{birthday}',
-        '{deathday}', '{gender}', '{shows}', '{last_updated_date}')"""
+        values ('{actor['name']}', '{actor['country']}', '{actor['birthday']}',
+        '{actor['deathday']}', '{actor['gender']}', '{shows}', '{actor['last_updated_date']}')"""
     try:
         cursor = db.cursor()
         cursor.execute(insert_actor_command)
@@ -59,11 +72,11 @@ def insert_actor(db, name, country, birthday, deathday, gender, shows, last_upda
         cursor.close()
         return actor_id
     except sqlite3.Error as e:
-        print(f'Failed to insert actor {name}: {e}')
+        print(f"Failed to insert actor {actor['name']}: {e}")
         return None
 
 
-def get_actor(db, id):
+def db_get_actor(db, id):
     try:
         cursor = db.cursor()
         cursor.execute(f"SELECT * FROM ACTORS WHERE ID={id}")
@@ -75,7 +88,7 @@ def get_actor(db, id):
         return None
 
 
-def delete_actor(db, id):
+def db_delete_actor(db, id):
     try:
         cursor = db.cursor()
         cursor.execute(f"DELETE FROM ACTORS WHERE ID={id}")
@@ -85,7 +98,7 @@ def delete_actor(db, id):
         print(f'Failed to delete Actor {id}')
 
 
-def validate_actor_id(db, id):
+def db_validate_actor_id(db, id):
     try:
         cursor = db.cursor()
         cursor.execute(f"SELECT * FROM ACTORS WHERE ID={id}")
@@ -96,7 +109,7 @@ def validate_actor_id(db, id):
         print(f'Failed to check if Actor {id} exists: {e}')
 
 
-def update_actor(db, id, col_name, value):
+def db_update_actor(db, id, col_name, value):
     try:
         cursor = db.cursor()
         cursor.execute(
@@ -108,27 +121,90 @@ def update_actor(db, id, col_name, value):
 
 
 def get_actor_links(db, id):
+    links = {}
+    links['self'] = {"href": f"http://127.0.0.1:5000/actors/{id}"}
+    if db_validate_actor_id(db, id - 1):
+        links['prev'] = {"href": f"http://127.0.0.1:5000/actors/{id - 1}"}
+    if db_validate_actor_id(db, id + 1):
+        links['next'] = {"href": f"http://127.0.0.1:5000/actors/{id + 1}"}
+    return links
+
+
+# ===== Connecting to the database =====
+try:
+    db = db_connect()
+    db_create_table(db)
+except:
+    print('Could not connect to database')
+    exit(0)
+
+# ===== API Helpers =====
+
+
+def tvmaze_handle_actor_response(data):
+    actor_data = data[0]['person']
+    last_updated_date = datetime.now().strftime('%Y-%m-%d-%H:%M:%S')
+
     return {
-        'self': {
-            "href": f"http://127.0.0.1:5000/actors/{id}"
-        }
-    }
+        'name': actor_data['name'],
+        'country': actor_data['country']['name'],
+        'birthday': actor_data['birthday'],
+        'deathday': actor_data['deathday'],
+        'gender': actor_data['gender'],
+        'last_updated_date': last_updated_date
+    }, actor_data['id']
 
 
-# Connecting to the database
-db_name = 'z5259123.sqlite'
-table_name = 'actors'
-db = sqlite3.connect(db_name, check_same_thread=False)
-create_table(db)
+def tvmaze_create_actor_url(actor_name):
+    actor_name = re.sub('[^0-9a-zA-Z]+', ' ', actor_name)
+    url = 'https://api.tvmaze.com/search/people?'
+    params = {'q': actor_name}
+    return url + urllib.parse.urlencode(params)
 
+
+def tvmaze_create_person_url(id):
+    url = f'https://api.tvmaze.com/people/{id}/castcredits?'
+    params = {'embed': 'show'}
+    return url + urllib.parse.urlencode(params)
+
+
+def tvmaze_get_actor_shows(id):
+    shows = []
+    url = tvmaze_create_person_url(id)
+
+    response = requests.get(url)
+    response_data = response.json()
+
+    if response_data == None:
+        return shows
+
+    for show in response_data:
+        show_name = show['_embedded']['show']['name']
+        shows.append(show_name)
+
+    return shows
+
+
+def tvmaze_get_actor_info(actor_name):
+
+    url = tvmaze_create_actor_url(actor_name)
+    response = requests.get(url)
+    response_data = response.json()
+
+    actor_info, actor_tvmaze_id = tvmaze_handle_actor_response(response_data)
+    actor_info['shows'] = tvmaze_get_actor_shows(actor_tvmaze_id)
+
+    return actor_info
 
 # ===== API HTTP Routes =====
+
 
 @api.route('/actors')
 class ActorsList(Resource):
     @api.expect(actor_input_model, validate=True)
     @api.response(201, 'Actor Added Succesfully')
     @api.response(400, 'Invalid actor name')
+    @api.response(404, 'Actor could not be foundß')
     def post(self):
         '''Q1 - Add a new Actor'''
 
@@ -136,32 +212,15 @@ class ActorsList(Resource):
         if 'name' not in params or params['name'] == '':
             return {"message": "Invalid name"}, 400
 
-        actor_name = re.sub('[^0-9a-zA-Z]+', ' ', params['name'])
-
-        url = 'https://api.tvmaze.com/search/people?q=' + actor_name
-
-        response = requests.get(url)
-        response_data = response.json()
-
-        if not response_data:
-            return {"Message": f"Actor {actor_name} could not be found"}, 400
-
-        actor_info = response_data[0]['person']
-        last_updated_date = datetime.now().strftime('%Y-%m-%d-%H:%M:%S')
-        shows = ''
-
-        new_actor_id = insert_actor(db,
-                                    actor_info['name'],
-                                    actor_info['country']['name'],
-                                    actor_info['birthday'],
-                                    actor_info['deathday'],
-                                    actor_info['gender'],
-                                    shows,
-                                    last_updated_date)
+        try:
+            actor_info = tvmaze_get_actor_info(params['name'])
+            new_actor_id = db_insert_actor(db, actor_info)
+        except:
+            return {"Message": f"Actor {params['name']} could not be found"}, 400
 
         return {
             'id': new_actor_id,
-            'last-update': last_updated_date,
+            'last-update': actor_info['last_updated_date'],
             '_links': get_actor_links(db, new_actor_id)
         }, 201
 
@@ -175,10 +234,10 @@ class Actors(Resource):
     def get(self, id):
         '''Q2 - Get actor information'''
 
-        if not validate_actor_id(db, id):
+        if not db_validate_actor_id(db, id):
             api.abort(404, f"Actor with id {id} does not exist")
 
-        actor = get_actor(db, id)
+        actor = db_get_actor(db, id)
 
         actor_info = {
             "id": id,
@@ -187,7 +246,7 @@ class Actors(Resource):
             "birthday": actor[3],
             "deathday": actor[4],
             'gender': actor[5],
-            "shows": actor[6],
+            "shows": actor[6].split(', '),
             "_links": get_actor_links(db, id),
             "last-update": actor[7]
         }
@@ -200,10 +259,10 @@ class Actors(Resource):
     def delete(self, id):
         '''Q3 - Delete an actor'''
 
-        if not validate_actor_id(db, id):
+        if not db_validate_actor_id(db, id):
             api.abort(404, f"Actor with id {id} does not exist")
 
-        delete_actor(db, id)
+        db_delete_actor(db, id)
 
         return {
             "message": f"The actor with id {id} was removed from the database!",
@@ -216,7 +275,7 @@ class Actors(Resource):
     def patch(self, id):
         '''Q4 - Update an actor'''
 
-        if not validate_actor_id(db, id):
+        if not db_validate_actor_id(db, id):
             api.abort(404, f"Actor with id {id} does not exist")
 
         new_data = request.json
@@ -226,11 +285,13 @@ class Actors(Resource):
         # for each key-value pair in the request body
         for key, value in new_data.items():
 
-            # ! Handle the list of shows part !
-            if type(value) != List:
-                update_actor(db, id, key, value)
+            if type(value) == list:
+                shows = ', '.join([str(s) for s in value])
+                db_update_actor(db, id, key, shows)
+            else:
+                db_update_actor(db, id, key, value)
 
-        update_actor(db, id, 'last_updated_date', new_updated_date)
+        db_update_actor(db, id, 'last_updated_date', new_updated_date)
 
         return {
             'id': id,
